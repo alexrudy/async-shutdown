@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use pin_project_lite::pin_project;
 use tokio::sync::broadcast;
 
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ShutdownSender(broadcast::Sender<()>);
@@ -147,5 +147,31 @@ mod tests {
         tx.send();
 
         assert!(poll!(&mut rx).is_ready(), "immediately ready");
+    }
+
+    fn assert_sync<T>(_t: T)
+    where
+        T: Sync,
+    {
+    }
+
+    #[test]
+    fn shutdown_is_sync() {
+        let (tx, rx) = channel();
+        assert_sync(tx);
+        assert_sync(rx);
+    }
+
+    fn assert_send<T>(_t: T)
+    where
+        T: Send,
+    {
+    }
+
+    #[test]
+    fn shutdown_is_send() {
+        let (tx, rx) = channel();
+        assert_send(tx);
+        assert_send(rx);
     }
 }

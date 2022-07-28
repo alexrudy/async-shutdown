@@ -392,4 +392,28 @@ mod test {
             assert!(poll!(f).is_ready(), "ready immediately");
         }
     }
+
+    fn assert_sync<T>(_t: T)
+    where
+        T: Sync,
+    {
+    }
+
+    #[test]
+    fn shutdown_is_sync() {
+        let s = Shutdown::new();
+        assert_sync(s);
+    }
+
+    fn assert_send<T>(_t: T)
+    where
+        T: Send,
+    {
+    }
+
+    #[test]
+    fn shutdown_is_send() {
+        let s = Shutdown::new();
+        assert_send(s);
+    }
 }
