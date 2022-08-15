@@ -59,17 +59,24 @@
 //! channel will be considered shutdown. Channels also support explicit notification
 //! (see [Shutdown::notify]).
 
-use std::sync::{Arc, Weak};
+use std::{
+    pin::Pin,
+    sync::{Arc, Weak},
+};
 
 mod channels;
 use channels::{ShutdownReceiver, ShutdownSender};
+use pin_project_lite::pin_project;
+use std::future::Future;
 
-#[derive(Debug)]
-pub struct ShutdownHandle {
-    channel: Weak<ShutdownSender>,
-    receiver: ShutdownReceiver,
+pin_project! {
+    #[derive(Debug)]
+    pub struct ShutdownHandle {
+        channel: Weak<ShutdownSender>,
+        #[pin]
+        receiver: ShutdownReceiver,
+    }
 }
-
 impl Clone for ShutdownHandle {
     fn clone(&self) -> Self {
         let channel = self.channel.clone();
@@ -115,6 +122,17 @@ impl ShutdownHandle {
 
     pub fn guard(&self) -> Option<ShutdownGuard> {
         self.channel.upgrade().map(|c| ShutdownGuard::from_tx(c))
+    }
+}
+
+impl Future for ShutdownHandle {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.project().receiver.poll(cx)
     }
 }
 
@@ -225,16 +243,21 @@ impl InnerShutdown {
     }
 }
 
-/// A controller for shutdown signals
-///
-/// This can hold either a strong or weak reference, and can convert between
-/// the two reference types at will (see [Shutdown::into_handle] and
-/// [Shutdown::into_guard]). When the last strong reference (guard) drops,
-/// the shutdown event will be automatically triggered. Events can also be
-/// manually triggered with [Shutdown::notify].
-#[derive(Debug, Clone)]
-pub struct Shutdown {
-    inner: InnerShutdown,
+pin_project! {
+
+    /// A controller for shutdown signals
+    ///
+    /// This can hold either a strong or weak reference, and can convert between
+    /// the two reference types at will (see [Shutdown::into_handle] and
+    /// [Shutdown::into_guard]). When the last strong reference (guard) drops,
+    /// the shutdown event will be automatically triggered. Events can also be
+    /// manually triggered with [Shutdown::notify].
+    #[derive(Debug, Clone)]
+    pub struct Shutdown {
+
+        inner: InnerShutdown,
+    }
+
 }
 
 impl Shutdown {
@@ -308,6 +331,29 @@ impl Shutdown {
     }
 }
 
+impl Future for Shutdown {
+    type Output = ();
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let proj = self.project();
+
+        match proj.inner {
+            InnerShutdown::Strong(strong) => {
+                *proj.inner = InnerShutdown::Weak(strong.handle());
+                if let InnerShutdown::Weak(weak) = proj.inner {
+                    Pin::new(weak).poll(cx)
+                } else {
+                    unreachable!("polling a strong handle should always downgrade.");
+                }
+            }
+            InnerShutdown::Weak(weak) => Pin::new(weak).poll(cx),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
 
@@ -338,6 +384,31 @@ mod test {
     }
 
     #[tokio::test]
+    async fn shutdown_as_future() {
+        let s = Shutdown::new();
+        let h = s.clone();
+
+        // Poll twice, should still be pending b/c we haven't dropped the receiver.
+        {
+            pin!(h);
+            assert!(poll!(&mut h).is_pending(), "pending first attempt");
+            drop(s);
+            assert!(poll!(&mut h).is_ready(), "ready after drop");
+        }
+    }
+
+    #[tokio::test]
+    async fn single_shutdown_as_future() {
+        let h = Shutdown::new();
+
+        // Polling shutdown implicitly weakens it and makes it ready instantly.
+        {
+            pin!(h);
+            assert!(poll!(&mut h).is_ready(), "ready for first poll");
+        }
+    }
+
+    #[tokio::test]
     async fn handle_only_returns_immediately() {
         let s = Shutdown::new();
         let mut h = s.into_handle();
@@ -345,6 +416,28 @@ mod test {
             let f = h.wait();
             pin!(f);
             assert!(poll!(f).is_ready(), "ready first attempt");
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_as_future() {
+        let s = Shutdown::new();
+        let h = s.handle();
+        {
+            pin!(h);
+            assert!(poll!(&mut h).is_pending(), "pending first attempt");
+            drop(s);
+            assert!(poll!(&mut h).is_ready(), "ready after drop attempt");
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_only_returns_immediately_as_future() {
+        let s = Shutdown::new();
+        let h = s.into_handle();
+        {
+            pin!(h);
+            assert!(poll!(&mut h).is_ready(), "ready first attempt");
         }
     }
 
