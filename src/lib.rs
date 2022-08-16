@@ -469,9 +469,75 @@ mod test {
     async fn handle_only_returns_immediately_as_future() {
         let s = Shutdown::new();
         let h = s.into_handle();
+        let h2 = h.clone();
         {
             pin!(h);
             assert!(poll!(&mut h).is_ready(), "ready first attempt");
+        }
+
+        // Keeping a second handle shows that they weakly reference.
+        drop(h2);
+    }
+
+    #[tokio::test]
+    async fn promote_handle() {
+        let h = ShutdownHandle::new();
+
+        let s = h.promote();
+        {
+            pin!(s);
+            assert!(poll!(&mut s).is_ready(), "Immediately ready")
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_clone_alive() {
+        let s = Shutdown::new();
+        let h = s.clone().into_handle();
+        let h2 = h.clone();
+        let s2 = s.clone();
+        {
+            s.notify();
+            pin!(h2);
+            assert!(poll!(&mut h2).is_ready());
+        }
+        drop(s2);
+    }
+
+    #[tokio::test]
+    async fn handle_to_guard() {
+        let s = Shutdown::new();
+        let h = s.clone().into_handle();
+        {
+            let g = h.guard();
+            assert!(g.is_some());
+
+            pin!(s);
+            assert!(
+                poll!(&mut s).is_pending(),
+                "still waiting, guard was created"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_to_no_guard() {
+        let h = ShutdownHandle::new();
+        let g = h.guard();
+        assert!(g.is_none(), "no guard");
+    }
+
+    #[tokio::test]
+    async fn handle_notify() {
+        let s = Shutdown::new();
+        let h = s.handle();
+        {
+            let h = h.into_handle();
+            h.notify();
+            pin!(s);
+            assert!(poll!(&mut s).is_ready(), "ready first attempt");
+            // Handle can be kept alive after notify, not a problem.
+            drop(h);
         }
     }
 
@@ -487,9 +553,17 @@ mod test {
     #[tokio::test]
     async fn shutdown_returns_immediately() {
         let s = Shutdown::new();
+        let h = s.handle();
         {
             pin!(s);
             assert!(poll!(&mut s).is_ready(), "ready first attempt");
+        }
+        {
+            pin!(h);
+            assert!(
+                poll!(&mut h).is_ready(),
+                "handle should be ready if shutdown was polled."
+            );
         }
     }
 
