@@ -222,8 +222,6 @@ impl ShutdownGuard {
     /// Convert this into a [Shutdown] instance, which can be used as either a weak
     /// or strong reference. This is helpful if you want to wait for notification,
     /// as that will automatically downgrade this back to a weak reference.
-    ///
-    /// Alternatively, one could use [ShutdownGuard::into_handle] to convert to a weak reference.
     pub fn promote(self) -> Shutdown {
         Shutdown {
             inner: InnerShutdown::Strong(self),
