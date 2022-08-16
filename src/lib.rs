@@ -89,7 +89,7 @@ impl Clone for ShutdownHandle {
         let receiver = self.channel.upgrade().map(|c| c.subscribe());
 
         Self {
-            channel: channel,
+            channel,
             receiver: receiver.into(),
         }
     }
@@ -127,7 +127,7 @@ impl ShutdownHandle {
 
     /// Try to convert this into a strong reference guard.
     pub fn guard(&self) -> Option<ShutdownGuard> {
-        self.channel.upgrade().map(|c| ShutdownGuard::from_tx(c))
+        self.channel.upgrade().map(ShutdownGuard::from_tx)
     }
 }
 
@@ -164,6 +164,12 @@ impl Clone for ShutdownGuard {
     }
 }
 
+impl Default for ShutdownGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShutdownGuard {
     /// Create a new, strongly referenced guard, which can be used to produce
     /// other strong guards or weak handles.
@@ -180,10 +186,7 @@ impl ShutdownGuard {
         let channel = Arc::downgrade(&self.channel);
         let receiver = self.channel.subscribe();
 
-        ShutdownHandle {
-            channel: channel,
-            receiver: receiver,
-        }
+        ShutdownHandle { channel, receiver }
     }
 
     /// Consume this guard and turn it into a weak shutdown handle. This re-uses
@@ -258,7 +261,7 @@ impl InnerShutdown {
 
     fn strong(&self) -> Option<InnerShutdown> {
         match self {
-            InnerShutdown::Weak(weak) => weak.guard().map(|s| InnerShutdown::Strong(s)),
+            InnerShutdown::Weak(weak) => weak.guard().map(InnerShutdown::Strong),
             InnerShutdown::Strong(strong) => Some(InnerShutdown::Strong(strong.clone())),
         }
     }
@@ -282,6 +285,12 @@ pin_project! {
         inner: InnerShutdown,
     }
 
+}
+
+impl Default for Shutdown {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Shutdown {
