@@ -19,7 +19,7 @@
 //! controller.notify();
 //!
 //! // Will complete immediately
-//! handle.wait().await
+//! handle.await
 //!
 //! # })
 //! ```
@@ -36,7 +36,7 @@
 //! drop(controller);
 //!
 //! // Will complete immediately
-//! handle.wait().await
+//! handle.await
 //!
 //! # })
 //! ```
@@ -49,7 +49,7 @@
 //! let controller = Shutdown::new();
 //!
 //! // Will complete immediately
-//! controller.wait().await
+//! controller.await
 //!
 //! # })
 //! ```
@@ -70,6 +70,12 @@ use pin_project_lite::pin_project;
 use std::future::Future;
 
 pin_project! {
+
+    /// Weak reference to a shutdown guard.
+    ///
+    /// The handle should be held by tasks which want to shutdown as soon as everything else is done,
+    /// such as background tasks. It will automatically resolve when all other references to the shutdown
+    /// guard have been dropped, or when the shutdown signal is sent.
     #[derive(Debug)]
     pub struct ShutdownHandle {
         channel: Weak<ShutdownSender>,
@@ -90,16 +96,14 @@ impl Clone for ShutdownHandle {
 }
 
 impl ShutdownHandle {
+    /// Create a new shutdown handle, which is a weak reference to a shutdown
+    /// guard. However, since no guard exists, this is an empty handle and polling it
+    /// will immediately return as ready.
     fn new() -> Self {
         ShutdownHandle {
             channel: Weak::new(),
             receiver: None.into(),
         }
-    }
-
-    /// Wait for a shutdown signal to be sent.
-    pub async fn wait(&mut self) {
-        (&mut self.receiver).await
     }
 
     /// Request that attached objects shut down.
@@ -116,10 +120,12 @@ impl ShutdownHandle {
         }
     }
 
+    /// Check if the underlying guard has already shut down.
     pub fn is_shutodwn(&self) -> bool {
         self.receiver.is_terminated() || self.channel.upgrade().is_none()
     }
 
+    /// Try to convert this into a strong reference guard.
     pub fn guard(&self) -> Option<ShutdownGuard> {
         self.channel.upgrade().map(|c| ShutdownGuard::from_tx(c))
     }
@@ -144,8 +150,8 @@ impl Future for ShutdownHandle {
 /// connected receivers will also drop.
 #[derive(Debug)]
 pub struct ShutdownGuard {
-    /// Reference-counted access to the broadcast::Sender. It must
-    /// be Arc'd so that we can have Weak references, even though [broadcast::Sender] is [Clone].
+    /// Reference-counted access to the [tokio::sync::broadcast::Sender]. It must
+    /// be Arc'd so that we can have Weak references, even though [tokio::sync::broadcast::Sender] is [Clone].
     channel: Arc<ShutdownSender>,
 
     /// The receiver, if it has not been used already to get a signal.
@@ -159,6 +165,8 @@ impl Clone for ShutdownGuard {
 }
 
 impl ShutdownGuard {
+    /// Create a new, strongly referenced guard, which can be used to produce
+    /// other strong guards or weak handles.
     pub fn new() -> Self {
         let (tx, rx) = channels::channel();
         Self {
@@ -167,6 +175,7 @@ impl ShutdownGuard {
         }
     }
 
+    /// Create a weak reference handle to this shutdown guard.
     pub fn handle(&self) -> ShutdownHandle {
         let channel = Arc::downgrade(&self.channel);
         let receiver = self.channel.subscribe();
@@ -177,6 +186,8 @@ impl ShutdownGuard {
         }
     }
 
+    /// Consume this guard and turn it into a weak shutdown handle. This re-uses
+    /// the receiver from the shutdown guard, and so may be slightly more efficient.
     fn into_handle(self) -> ShutdownHandle {
         ShutdownHandle {
             channel: Arc::downgrade(&self.channel),
@@ -184,6 +195,7 @@ impl ShutdownGuard {
         }
     }
 
+    /// Create a shutdown guard from a transmission channel.
     fn from_tx(tx: Arc<ShutdownSender>) -> Self {
         let rx = tx.subscribe();
         Self {
@@ -192,14 +204,23 @@ impl ShutdownGuard {
         }
     }
 
+    /// Notify subscribers that they should shut down.
     pub fn notify(&self) {
         self.channel.send()
     }
 
-    pub fn is_shutodwn(&self) -> bool {
+    /// Check if this receiver is already shut down.
+    ///
+    /// This will be false until something has awaited this shutdown instance.
+    pub fn is_shutdown(&self) -> bool {
         self.receiver.is_terminated()
     }
 
+    /// Convert this into a [Shutdown] instance, which can be used as either a weak
+    /// or strong reference. This is helpful if you want to wait for notification,
+    /// as that will automatically downgrade this back to a weak reference.
+    ///
+    /// Alternatively, one could use [ShutdownGuard::into_handle] to convert to a weak reference.
     pub fn promote(self) -> Shutdown {
         Shutdown {
             inner: InnerShutdown::Strong(self),
@@ -214,17 +235,17 @@ enum InnerShutdown {
 }
 
 impl InnerShutdown {
-    async fn wait(self) {
-        match self {
-            InnerShutdown::Weak(mut weak) => weak.wait().await,
-            InnerShutdown::Strong(strong) => strong.into_handle().wait().await,
-        }
-    }
-
     fn notify(&self) {
         match self {
             InnerShutdown::Weak(weak) => weak.notify(),
             InnerShutdown::Strong(strong) => strong.notify(),
+        }
+    }
+
+    fn is_shutdown(&self) -> bool {
+        match self {
+            InnerShutdown::Weak(weak) => weak.is_shutodwn(),
+            InnerShutdown::Strong(strong) => strong.is_shutdown(),
         }
     }
 
@@ -252,6 +273,9 @@ pin_project! {
     /// [Shutdown::into_guard]). When the last strong reference (guard) drops,
     /// the shutdown event will be automatically triggered. Events can also be
     /// manually triggered with [Shutdown::notify].
+    ///
+    /// If you want to control whether a shutdown guard is weakly held or strongly held,
+    /// use the [ShutdownGuard] and [ShutdownHandle] types instead.
     #[derive(Debug, Clone)]
     pub struct Shutdown {
 
@@ -262,6 +286,37 @@ pin_project! {
 
 impl Shutdown {
     /// New, strongly referenced shutdown manager.
+    ///
+    /// Note that if this is the only shutdown guard, it will complete immediately (since all other guards
+    /// have already shut down)
+    ///  
+    /// ```
+    /// # use async_shutdown::Shutdown;
+    /// # tokio_test::block_on(async {
+    /// let handle = Shutdown::new();
+    ///
+    /// // Will complete immediately
+    /// handle.await
+    ///
+    /// # })
+    /// ```
+    ///
+    /// To use this effecitvely, you'll want to retain additional handles:
+    /// ```
+    /// # use async_shutdown::Shutdown;
+    /// # use tokio::pin;
+    /// # use futures::poll;
+    /// # tokio_test::block_on(async {
+    /// let handle = Shutdown::new();
+    /// let guard = handle.clone();
+    ///
+    /// // Will not complete until the guard drops or .notify() is called.
+    /// // handle.await
+    /// pin!(handle);
+    /// assert!(poll!(handle).is_pending());
+    ///
+    /// # })
+    /// ```
     pub fn new() -> Shutdown {
         Shutdown {
             inner: InnerShutdown::Strong(ShutdownGuard::new()),
@@ -269,20 +324,24 @@ impl Shutdown {
     }
 
     /// New, empty shutdown manager which is already shut down.
+    ///
+    /// When this [Shutdown] guard is polled or awaited, it will
+    /// return immediately.
+    ///
+    /// ```
+    /// # use async_shutdown::Shutdown;
+    /// # tokio_test::block_on(async {
+    /// let handle = Shutdown::empty();
+    ///
+    /// // Will complete immediately
+    /// handle.await
+    ///
+    /// # })
+    /// ```
     pub fn empty() -> Shutdown {
         Shutdown {
             inner: InnerShutdown::Weak(ShutdownHandle::new()),
         }
-    }
-
-    /// Wait until we receive a shutdown signal
-    ///
-    /// If you don't want to consume the [Shutdown] manager, use a [ShutdownHandle]
-    /// instead.
-    //TODO: This whole stack of objects could impl Future instead since it can only
-    // be awaited a single time.
-    pub async fn wait(self) {
-        self.inner.wait().await
     }
 
     /// Wait until a sigint / ctrl-c signal occurs
@@ -325,6 +384,13 @@ impl Shutdown {
         }
     }
 
+    /// Check if this Shutdown has already fired.
+    ///
+    /// This will be false until something has awaited this shutdown instance.
+    pub fn is_shutdown(&self) -> bool {
+        self.inner.is_shutdown()
+    }
+
     /// Convert this shutdown into a strong shutdown guard.
     pub fn guard(&self) -> Option<Self> {
         self.inner.strong().map(|s| Shutdown { inner: s })
@@ -363,27 +429,6 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn wait_cancel_safe() {
-        let s = Shutdown::new();
-        let mut h = s.clone().into_handle();
-
-        // Poll twice, should still be pending b/c we haven't dropped the receiver.
-        {
-            let f = h.wait();
-            pin!(f);
-            assert!(poll!(f).is_pending(), "pending first attempt");
-        }
-
-        {
-            let f = h.wait();
-            pin!(f);
-            assert!(poll!(f).is_pending(), "pending after cancel");
-        }
-
-        drop(s);
-    }
-
-    #[tokio::test]
     async fn shutdown_as_future() {
         let s = Shutdown::new();
         let h = s.clone();
@@ -405,17 +450,6 @@ mod test {
         {
             pin!(h);
             assert!(poll!(&mut h).is_ready(), "ready for first poll");
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_only_returns_immediately() {
-        let s = Shutdown::new();
-        let mut h = s.into_handle();
-        {
-            let f = h.wait();
-            pin!(f);
-            assert!(poll!(f).is_ready(), "ready first attempt");
         }
     }
 
@@ -442,47 +476,72 @@ mod test {
     }
 
     #[tokio::test]
+    async fn empty_shutdown_returns_immediately() {
+        let s = Shutdown::empty();
+        {
+            pin!(s);
+            assert!(poll!(&mut s).is_ready(), "ready first attempt");
+        }
+    }
+
+    #[tokio::test]
     async fn shutdown_returns_immediately() {
         let s = Shutdown::new();
         {
-            let f = s.wait();
-            pin!(f);
-            assert!(poll!(f).is_ready(), "ready first attempt");
+            pin!(s);
+            assert!(poll!(&mut s).is_ready(), "ready first attempt");
         }
     }
 
     #[tokio::test]
-    async fn shutdown_empty_returns_immediately() {
-        let s = Shutdown::empty();
-        {
-            let f = s.wait();
-            pin!(f);
-            assert!(poll!(f).is_ready(), "ready first attempt");
-        }
-    }
-
-    #[tokio::test]
-    async fn ready_immediately_after_notify() {
+    async fn ready_immediately_after_notify_handle() {
         let s = Shutdown::new();
-        let mut h = s.clone().into_handle();
+        let h = s.clone().into_handle();
         {
-            let f = h.wait();
-            pin!(f);
-            assert!(poll!(f).is_pending(), "pending first attempt");
+            pin!(h);
+            assert!(poll!(&mut h).is_pending(), "pending first attempt");
+
+            s.notify();
+
+            assert!(poll!(&mut h).is_ready(), "ready after notify");
+
+            assert!(poll!(&mut h).is_ready(), "ready immediately");
         }
+    }
 
-        s.notify();
-
+    #[tokio::test]
+    async fn ready_immediately_after_notify_shutdown() {
+        let s = Shutdown::new();
+        let h = s.clone();
         {
-            let f = h.wait();
-            pin!(f);
-            assert!(poll!(f).is_ready(), "ready after notify");
+            pin!(h);
+            assert!(poll!(&mut h).is_pending(), "pending first attempt");
+
+            s.notify();
+
+            assert!(poll!(&mut h).is_ready(), "ready after notify");
         }
+    }
 
+    #[tokio::test]
+    async fn ready_immediately_after_notify_guard() {
+        let s = ShutdownGuard::new();
+        let h = s.handle();
         {
-            let f = h.wait();
-            pin!(f);
-            assert!(poll!(f).is_ready(), "ready immediately");
+            pin!(h);
+            assert!(poll!(&mut h).is_pending(), "pending first attempt");
+
+            s.notify();
+            assert!(!s.is_shutdown());
+            assert!(!h.is_shutodwn());
+
+            assert!(poll!(&mut h).is_ready(), "ready after notify");
+            assert!(h.is_shutodwn());
+
+            let p = s.promote();
+            pin!(p);
+            assert!(poll!(&mut p).is_ready(), "sender is ready after notify");
+            assert!(p.is_shutdown());
         }
     }
 

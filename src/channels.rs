@@ -49,7 +49,10 @@ impl<'s> fmt::Debug for DebugLiteral<'s> {
 }
 
 /// Wait for our [broadcast::Receiver] to get a message. We assume that effectively
-/// any return from the receiver is "good enough".
+/// any return from the receiver is "good enough". If an error occured, that usually
+/// means that someone tried to send something and we missed it (lag would be difficult
+/// to achieve here), or closed all of the senders, which is equivalent to dropping all
+/// of the senders and indicates that we'd probably like to shut down.
 async fn recv_once(mut rx: broadcast::Receiver<()>) {
     match rx.recv().await {
         Ok(()) => {
