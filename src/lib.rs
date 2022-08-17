@@ -113,13 +113,6 @@ impl ShutdownHandle {
         }
     }
 
-    /// Create a [Shutdown] manager object from this handle
-    pub fn promote(self) -> Shutdown {
-        Shutdown {
-            inner: InnerShutdown::Weak(self),
-        }
-    }
-
     /// Check if the underlying guard has already shut down.
     pub fn is_shutodwn(&self) -> bool {
         self.receiver.is_terminated() || self.channel.upgrade().is_none()
@@ -217,15 +210,6 @@ impl ShutdownGuard {
     /// This will be false until something has awaited this shutdown instance.
     pub fn is_shutdown(&self) -> bool {
         self.receiver.is_terminated()
-    }
-
-    /// Convert this into a [Shutdown] instance, which can be used as either a weak
-    /// or strong reference. This is helpful if you want to wait for notification,
-    /// as that will automatically downgrade this back to a weak reference.
-    pub fn promote(self) -> Shutdown {
-        Shutdown {
-            inner: InnerShutdown::Strong(self),
-        }
     }
 }
 
@@ -427,6 +411,22 @@ impl Future for Shutdown {
     }
 }
 
+impl From<ShutdownGuard> for Shutdown {
+    fn from(guard: ShutdownGuard) -> Self {
+        Shutdown {
+            inner: InnerShutdown::Strong(guard),
+        }
+    }
+}
+
+impl From<ShutdownHandle> for Shutdown {
+    fn from(handle: ShutdownHandle) -> Self {
+        Shutdown {
+            inner: InnerShutdown::Weak(handle),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
 
@@ -490,7 +490,7 @@ mod test {
     async fn promote_handle() {
         let h = ShutdownHandle::new();
 
-        let s = h.promote();
+        let s: Shutdown = h.into();
         {
             pin!(s);
             assert!(poll!(&mut s).is_ready(), "Immediately ready")
@@ -619,7 +619,7 @@ mod test {
             assert!(poll!(&mut h).is_ready(), "ready after notify");
             assert!(h.is_shutodwn());
 
-            let p = s.promote();
+            let p: Shutdown = s.into();
             pin!(p);
             assert!(poll!(&mut p).is_ready(), "sender is ready after notify");
             assert!(p.is_shutdown());
