@@ -113,6 +113,13 @@ impl ShutdownHandle {
         }
     }
 
+    pub async fn sigint(&mut self) {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = self => {},
+        };
+    }
+
     /// Check if the underlying guard has already shut down.
     pub fn is_shutodwn(&self) -> bool {
         self.receiver.is_terminated() || self.channel.upgrade().is_none()
@@ -338,8 +345,9 @@ impl Shutdown {
     /// Wait until a sigint / ctrl-c signal occurs
     /// and then shutdown.
     pub async fn sigint(self) {
-        let _ = tokio::signal::ctrl_c().await;
-        self.inner.notify()
+        let mut handle = self.into_handle();
+        handle.sigint().await;
+        handle.notify();
     }
 
     /// Request that all shutdown objects shut down.
@@ -623,6 +631,21 @@ mod test {
             pin!(p);
             assert!(poll!(&mut p).is_ready(), "sender is ready after notify");
             assert!(p.is_shutdown());
+        }
+    }
+
+    #[tokio::test]
+    async fn sigint_stopped_by_notify() {
+        let s = Shutdown::new();
+        let h = s.clone();
+
+        {
+            let f = s.sigint();
+            pin!(f);
+            assert!(poll!(&mut f).is_pending(), "waiting for signal");
+
+            h.notify();
+            assert!(poll!(&mut f).is_ready(), "notified");
         }
     }
 
