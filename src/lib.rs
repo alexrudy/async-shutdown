@@ -41,7 +41,8 @@
 //! # })
 //! ```
 //!
-//! Controllers can wait on themselves, which cause them to complete immediately:
+//! Controllers can wait on themselves, which cause them to complete immediately
+//! if there are no other remaining controllers:
 //!
 //! ```
 //! # use async_shutdown::Shutdown;
@@ -83,6 +84,7 @@ pin_project! {
         receiver: ShutdownReceiver,
     }
 }
+
 impl Clone for ShutdownHandle {
     fn clone(&self) -> Self {
         let channel = self.channel.clone();
@@ -345,7 +347,7 @@ impl Shutdown {
     /// Wait until a sigint / ctrl-c signal occurs
     /// and then shutdown.
     pub async fn sigint(self) {
-        let mut handle = self.into_handle();
+        let mut handle = self.as_handle();
         handle.sigint().await;
         handle.notify();
     }
@@ -365,7 +367,7 @@ impl Shutdown {
     /// Unwrap this shutdown trigger and create a strong reference
     /// [ShutdownGuard]. If this is a weak reference and the trigger
     /// is already shutdown, this method returns [None].
-    pub fn into_guard(self) -> Option<ShutdownGuard> {
+    pub fn as_guard(self) -> Option<ShutdownGuard> {
         match self.inner {
             InnerShutdown::Weak(weak) => weak.guard(),
             InnerShutdown::Strong(strong) => Some(strong),
@@ -376,7 +378,7 @@ impl Shutdown {
     /// [ShutdownHandle]. If this was the last strong reference,
     /// then the underlying shutdown notification will be triggered and
     /// all shutdown controllers will return immediately from .await.
-    pub fn into_handle(self) -> ShutdownHandle {
+    pub fn as_handle(self) -> ShutdownHandle {
         match self.inner {
             InnerShutdown::Weak(weak) => weak,
             InnerShutdown::Strong(strong) => strong.into_handle(),
@@ -483,7 +485,7 @@ mod test {
     #[tokio::test]
     async fn handle_only_returns_immediately_as_future() {
         let s = Shutdown::new();
-        let h = s.into_handle();
+        let h = s.as_handle();
         let h2 = h.clone();
         {
             pin!(h);
@@ -508,7 +510,7 @@ mod test {
     #[tokio::test]
     async fn handle_clone_alive() {
         let s = Shutdown::new();
-        let h = s.clone().into_handle();
+        let h = s.clone().as_handle();
         let h2 = h.clone();
         let s2 = s.clone();
         {
@@ -522,7 +524,7 @@ mod test {
     #[tokio::test]
     async fn handle_to_guard() {
         let s = Shutdown::new();
-        let h = s.clone().into_handle();
+        let h = s.clone().as_handle();
         {
             let g = h.guard();
             assert!(g.is_some());
@@ -547,7 +549,7 @@ mod test {
         let s = Shutdown::new();
         let h = s.handle();
         {
-            let h = h.into_handle();
+            let h = h.as_handle();
             h.notify();
             pin!(s);
             assert!(poll!(&mut s).is_ready(), "ready first attempt");
@@ -585,7 +587,7 @@ mod test {
     #[tokio::test]
     async fn ready_immediately_after_notify_handle() {
         let s = Shutdown::new();
-        let h = s.clone().into_handle();
+        let h = s.clone().as_handle();
         {
             pin!(h);
             assert!(poll!(&mut h).is_pending(), "pending first attempt");
