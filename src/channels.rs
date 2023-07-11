@@ -1,6 +1,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 
 use pin_project_lite::pin_project;
@@ -8,12 +9,16 @@ use tokio::sync::broadcast;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;
 
-#[derive(Debug, Clone)]
-pub(crate) struct ShutdownSender(broadcast::Sender<()>);
+#[derive(Debug)]
+pub(crate) struct ShutdownSender {
+    sender: broadcast::Sender<()>,
+    state: AtomicBool,
+}
 
 impl ShutdownSender {
     pub(crate) fn send(&self) {
-        match self.0.send(()) {
+        self.state.store(true, std::sync::atomic::Ordering::Release);
+        match self.sender.send(()) {
             Ok(n) => {
                 tracing::trace!(n, "shutdown notified");
             }
@@ -24,13 +29,20 @@ impl ShutdownSender {
     }
 
     pub(crate) fn subscribe(&self) -> ShutdownReceiver {
-        self.0.subscribe().into()
+        if !self.state.load(std::sync::atomic::Ordering::Acquire) {
+            self.sender.subscribe().into()
+        } else {
+            None.into()
+        }
     }
 }
 
 impl From<broadcast::Sender<()>> for ShutdownSender {
     fn from(tx: broadcast::Sender<()>) -> Self {
-        ShutdownSender(tx)
+        ShutdownSender {
+            sender: tx,
+            state: AtomicBool::new(false),
+        }
     }
 }
 
@@ -148,6 +160,23 @@ mod tests {
         assert!(poll!(&mut rx).is_pending(), "not yet ready");
 
         tx.send();
+
+        assert!(poll!(&mut rx).is_ready(), "immediately ready");
+    }
+
+    #[tokio::test]
+    async fn send_then_subscribe() {
+        let (tx, rx) = channel();
+
+        pin!(rx);
+
+        assert!(poll!(&mut rx).is_pending(), "not yet ready");
+
+        tx.send();
+
+        assert!(poll!(&mut rx).is_ready(), "immediately ready");
+
+        let mut rx = tx.subscribe();
 
         assert!(poll!(&mut rx).is_ready(), "immediately ready");
     }
